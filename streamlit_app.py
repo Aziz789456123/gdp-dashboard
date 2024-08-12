@@ -1,151 +1,75 @@
-import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import streamlit as st
+import plotly.express as px
+import json
+from pandas.api.types import is_string_dtype
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+st.title("Analyse des risques pour assurance")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Téléchargement des fichiers
+uploaded_files = {
+    'inscription': st.file_uploader("Télécharger le fichier des inscriptions", type="xlsx"),
+    'foyer': st.file_uploader("Télécharger le fichier des foyers", type="xlsx"),
+    'individu': st.file_uploader("Télécharger le fichier des individus", type="xlsx"),
+    'accident': st.file_uploader("Télécharger le fichier des accidents", type="xlsx")
+}
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# Vérification que tous les fichiers sont téléchargés
+if all(uploaded_files.values()):
+    # Chargement des données
+    @st.cache_data
+    def load_data(uploaded_files):
+        dfs = {}
+        for key, file in uploaded_files.items():
+            dfs[key] = pd.read_excel(file)
+            # Traiter les colonnes JSON si besoin
+            for col in dfs[key].columns:
+                if is_string_dtype(dfs[key][col]):
+                    try:
+                        dfs[key][col] = dfs[key][col].apply(lambda x: json.dumps(x) if isinstance(x, dict) else x)
+                    except (json.JSONDecodeError, TypeError):
+                        pass  # Ignorer si la colonne n'est pas JSON
+        return dfs
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+    dfs = load_data(uploaded_files)
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+    # Extraire uniquement les 4 derniers chiffres des années de naissance
+    for df in dfs.values():
+        df['ANNEE DE NAISSANCE'] = df['ANNEE DE NAISSANCE'].astype(str).str[-4:]
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+    # Fréquence des accidents par type (regroupement des types peu fréquents)
+    accident_types = dfs['accident']["De quel type d'accident s'agissait-il ?"].value_counts()
+    other_threshold = accident_types.max() * 0.01  # Seuil de 1% du maximum pour regrouper les autres
+    accident_types = accident_types.where(accident_types >= other_threshold, other='Autres')
+    accident_types = accident_types.value_counts().reset_index(name='Nombre d\'accidents')
+    accident_types.columns = ['Type d\'accident', 'Nombre d\'accidents']
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+    fig_accident_types = px.bar(accident_types, x='Type d\'accident', y='Nombre d\'accidents', 
+                                title="Répartition des types d'accidents",
+                                labels={'Type d\'accident': 'Type d\'accident', 'Nombre d\'accidents': 'Nombre d\'accidents'})
+    fig_accident_types.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig_accident_types)
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    # Répartition des accidents par lieu (regroupement des lieux peu fréquents)
+    accident_location_counts = dfs['accident']["Où a eu lieu l'accident ?"].value_counts()
+    other_threshold_location = accident_location_counts.max() * 0.01  # Seuil de 1% du maximum pour regrouper les autres
+    accident_location_counts = accident_location_counts.where(accident_location_counts >= other_threshold_location, other='Autres')
+    accident_location_counts = accident_location_counts.value_counts().reset_index(name='Nombre d\'accidents')
+    accident_location_counts.columns = ['Lieu de l\'accident', 'Nombre d\'accidents']
 
-    return gdp_df
+    fig_accident_location = px.pie(accident_location_counts, values='Nombre d\'accidents', names='Lieu de l\'accident', 
+                                   title="Répartition des accidents par lieu")
+    st.plotly_chart(fig_accident_location)
 
-gdp_df = get_gdp_data()
+    # Spécification du format de date pour éviter l'avertissement
+    dfs['accident']['Date'] = pd.to_datetime(dfs['accident']["À quelle date a eu lieu l'accident de la vie courante ?"], dayfirst=True)
+    accidents_by_month = dfs['accident'].groupby(dfs['accident']['Date'].dt.to_period("M")).size().reset_index(name='Nombre d\'accidents')
+    accidents_by_month['Date'] = accidents_by_month['Date'].dt.to_timestamp()
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+    fig_time = px.line(accidents_by_month, x='Date', y='Nombre d\'accidents', 
+                       title="Évolution du nombre d'accidents au fil du temps",
+                       labels={'Date': 'Date', 'Nombre d\'accidents': 'Nombre d\'accidents'})
+    st.plotly_chart(fig_time)
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+else:
+    st.warning("Veuillez télécharger tous les fichiers nécessaires pour commencer l'analyse.")
